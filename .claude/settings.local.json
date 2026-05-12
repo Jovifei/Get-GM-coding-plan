@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:bigmodel.cn)",
+      "Bash(pip install:*)",
+      "Bash(python -c \"from src.browser import BrowserManager; from src.login import LoginManager; from src.coder import CoderManager; from src.payment import PaymentManager; from src.scheduler import Scheduler; print\\('All imports OK'\\)\")",
+      "Bash(python -c \"from src.config import Config; c = Config\\(\\); c.load\\(\\); print\\('Config phone:', c.account.get\\('phone', 'NOT SET'\\)\\)\")",
+      "Bash(python -c ':*)",
+      "Bash(playwright install:*)",
+      "Bash(python main.py --mode test --debug)",
+      "Bash(python:*)",
+      "Bash(claude mcp:*)",
+      "Bash(where bash:*)",
+      "Read(//usr/bin/**)",
+      "Read(//bin/**)",
+      "Bash(CLAUDE_CODE_GIT_BASH_PATH=\"D:/Program Files/Git/usr/bin/bash.exe\" claude mcp:*)",
+      "Bash(CLAUDE_CODE_GIT_BASH_PATH=\"D:\\\\\\\\Program Files\\\\\\\\Git\\\\\\\\usr\\\\\\\\bin\\\\\\\\bash.exe\" claude mcp:*)",
+      "Bash(python3 -m json.tool)",
+      "Read(//c/Users/Admin/**)",
+      "Read(//d/Program Files/Git/usr/bin/**)",
+      "Read(//c/Program Files/Git/usr/bin/**)",
+      "Read(//d/Program Files/Git/bin/**)",
+      "Bash(CLAUDE_CODE_GIT_BASH_PATH=\"/d/Program Files/Git/usr/bin/bash\" claude mcp:*)",
+      "mcp__context7__query-docs",
+      "Bash(python3:*)",
+      "WebSearch"
+    ]
+  }
+}

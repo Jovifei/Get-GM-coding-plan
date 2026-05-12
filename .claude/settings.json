@@ -1,0 +1,12 @@
+{
+  "mcpServerManagement": {
+    "mode": "selected",
+    "selectedServers": ["chrome-devtools"]
+  },
+  "mcpServers": {
+    "chrome-devtools": {
+      "command": "npx",
+      "args": ["chrome-devtools-mcp@latest"]
+    }
+  }
+}

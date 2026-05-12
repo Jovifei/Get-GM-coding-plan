@@ -1,0 +1,32 @@
+# BigModel.cn 抢购配置
+
+account:
+  phone: "17368672935" # 手机号
+  password: "521592659aSD" # 密码
+
+purchase:
+  hour: 10
+  minute: 0
+  end_after: 1200 # 检测持续到 10:20（10:00 后 20 分钟）
+  plan_type: "quarterly" # 首选套餐：连续包季 Lite
+  fallback_plan: "monthly" # 售罄后降级
+  refresh_interval: 1.5 # 按钮灰色/人数过多时每 1.5 秒刷新
+
+preheat:
+  enabled: true           # 是否启用预热模式
+  login_time: "09:55:00"  # 预热登录时间
+  launch_time: "09:57:00" # 提前启动实例，确保 09:58 前就绪
+  click_time: "09:58:00"  # 开始抢购检测时间
+  instances: 3            # 并发实例数
+  use_threads: false      # Playwright Sync API 不跨线程点击，避免线程提前中断
+  instance_launch_interval: 10  # 实例启动间隔（秒）
+  click_buffer: 120       # 10:00 前 120 秒开始高频检测，即 09:58
+  no_refresh_window: 20   # 抢购窗口内不刷新的秒数
+
+browser:
+  headless: false
+  screenshot: true
+
+debug:
+  save_html: true
+  console_log: true
