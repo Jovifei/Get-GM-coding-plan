@@ -25,7 +25,7 @@ def is_retry_limited_text(text: str) -> bool:
 
 
 def is_ready_purchase_text(text: str) -> bool:
-    ready_markers = ("特惠订购", "立即订购", "立即购买")
+    ready_markers = ("特惠订购", "立即订购", "立即购买", "特惠订阅")
     blocked_markers = ("抢购人数过多", "刷新再试", "售罄", "售完")
     value = text or ""
     return any(marker in value for marker in ready_markers) and not any(marker in value for marker in blocked_markers)
