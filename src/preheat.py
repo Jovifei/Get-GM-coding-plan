@@ -1,10 +1,9 @@
 """预热登录与多实例并发管理 (Async)"""
 import asyncio
 import logging
-import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Optional, Dict, Any, Callable
+from typing import Dict, Any
 
 from playwright.async_api import async_playwright
 
@@ -12,7 +11,6 @@ from src.browser import BrowserManager
 from src.diagnostics import diagnostic_step
 from src.login import LoginManager
 from src.coder import CoderManager
-from src.payment import PaymentManager
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +123,12 @@ class PreheatManager:
                     timeout=purchase_config.get('end_after', 900)
                 )
             if click_result.get("success") and not self.success_event.is_set():
-                if not self.success_event.is_set():
-                    self.success_event.set()
-                    self.stop_event.set()
-                    self.winner_result = click_result
-                    self.winner_result["instance_id"] = instance.id
-                    logger.info(f"实例 {instance.id} 抢购成功!")
-                    return self.winner_result
+                self.success_event.set()
+                self.stop_event.set()
+                self.winner_result = click_result
+                self.winner_result["instance_id"] = instance.id
+                logger.info(f"实例 {instance.id} 抢购成功!")
+                return self.winner_result
             result["reason"] = click_result.get("reason", "未抢购成功")
         except Exception as e:
             logger.exception(f"实例 {instance.id} 异常: {e}")
