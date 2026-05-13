@@ -32,7 +32,7 @@ def test_is_ready_purchase_text():
 
 
 def test_is_ready_purchase_text_handles_subscription_variant():
-    """特惠订阅 should be recognized as purchasable (currently NOT in markers — this test will fail)"""
+    """特惠订阅 should be recognized as purchasable"""
     from src.coder import is_ready_purchase_text
     assert is_ready_purchase_text("特惠订阅") is True
 
