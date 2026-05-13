@@ -1,6 +1,5 @@
 """Tests for pure-logic helper functions in coder.py"""
-import pytest
-from datetime import datetime, timedelta
+from datetime import datetime
 
 
 def test_calculate_click_window():
@@ -29,6 +28,7 @@ def test_is_ready_purchase_text():
     assert is_ready_purchase_text("抢购人数过多") is False
     assert is_ready_purchase_text("暂时售罄") is False
     assert is_ready_purchase_text("") is False
+    assert is_ready_purchase_text("特惠订阅 - 抢购人数过多") is False
 
 
 def test_is_ready_purchase_text_handles_subscription_variant():
