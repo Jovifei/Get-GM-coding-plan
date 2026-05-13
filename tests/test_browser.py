@@ -8,7 +8,9 @@ def test_browser_manager_launch_is_coroutine():
     assert inspect.iscoroutinefunction(BrowserManager._launch)
     assert inspect.iscoroutinefunction(BrowserManager.close)
     assert inspect.iscoroutinefunction(BrowserManager.take_screenshot)
+    assert inspect.iscoroutinefunction(BrowserManager.save_html)
     assert inspect.iscoroutinefunction(BrowserManager.save_state)
+    assert inspect.iscoroutinefunction(BrowserManager.load_state)
 
 
 def test_browser_manager_get_page_stays_sync():
