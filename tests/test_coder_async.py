@@ -2,7 +2,7 @@
 import pytest
 import inspect
 from datetime import datetime, timedelta
-from src.coder import CoderManager, should_skip_refresh, get_effective_refresh_interval
+from src.coder import CoderManager, should_skip_refresh
 
 
 def test_coder_methods_are_coroutines():
@@ -40,17 +40,3 @@ def test_should_skip_refresh_no_window():
     target = datetime(2026, 5, 12, 10, 0, 0)
     now = datetime(2026, 5, 12, 9, 59, 50)
     assert should_skip_refresh(now, target, no_refresh_window=0) is False
-
-
-def test_get_effective_refresh_interval_sprint_mode():
-    target = datetime(2026, 5, 12, 10, 0, 0)
-
-    # Sprint mode: inside window → 999 (no refresh)
-    now = datetime(2026, 5, 12, 10, 0, 5)
-    interval = get_effective_refresh_interval(now, target, base_interval=0.8, no_refresh_window=20)
-    assert interval == 999.0
-
-    # Normal mode: outside window
-    now = datetime(2026, 5, 12, 9, 58, 0)
-    interval = get_effective_refresh_interval(now, target, base_interval=0.8, no_refresh_window=20)
-    assert interval == 0.8

@@ -59,17 +59,6 @@ def should_skip_refresh(now: datetime, target_time: datetime, no_refresh_window:
     return window_start <= now < window_end
 
 
-def get_effective_refresh_interval(now: datetime, target_time: datetime, base_interval: float, no_refresh_window: int) -> float:
-    """获取当前时刻的有效刷新间隔。冲刺模式返回 999（不刷新）"""
-    if no_refresh_window <= 0:
-        return base_interval
-    window_start = target_time - timedelta(seconds=no_refresh_window)
-    window_end = target_time + timedelta(seconds=no_refresh_window)
-    if window_start <= now < window_end:
-        return 999.0
-    return base_interval
-
-
 class CoderManager:
     """抢购管理器"""
 
@@ -332,18 +321,6 @@ class CoderManager:
             target += timedelta(days=1)
 
         return target
-
-    async def _wait_until_target(self, target_time: datetime):
-        """等待到达目标时间"""
-        refresh_interval = self.purchase_config.get('refresh_interval', 0.5)
-
-        while datetime.now() < target_time:
-            remaining = (target_time - datetime.now()).total_seconds()
-            if remaining > 60:
-                logger.info(f"等待 {remaining:.0f} 秒...")
-                await asyncio.sleep(min(remaining - 55, 5))  # 提前55秒开始快速刷新
-            else:
-                await asyncio.sleep(refresh_interval)
 
     async def _refresh_for_retry_if_needed(self, last_refresh_time: float, refresh_interval: float, reason: str, step_name: str) -> float:
         now = time.time()
