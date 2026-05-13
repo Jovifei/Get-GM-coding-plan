@@ -196,7 +196,7 @@ class Scheduler:
         while datetime.now() < end_time and self.running:
             try:
                 # 调用任务函数，传入目标时间
-                result = self.task_func(self.config, debug=True, target_time=target)
+                result = await self.task_func(self.config, debug=True, target_time=target)
 
                 if result:
                     logger.info("抢购任务成功!")
