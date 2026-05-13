@@ -1,11 +1,11 @@
 """抢购核心模块"""
+import asyncio
 import logging
-import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
-from playwright.sync_api import Page
+from playwright.async_api import Page
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,31 @@ def get_subscription_period_label(plan_type: str) -> str:
 def get_refresh_interval(config: dict) -> float:
     purchase_config = config.get("purchase", {})
     preheat_config = config.get("preheat", {})
-    return float(purchase_config.get("refresh_interval", preheat_config.get("refresh_interval", 1.5)))
+    return float(purchase_config.get("refresh_interval", preheat_config.get("refresh_interval", 0.8)))
+
+
+def should_skip_refresh(now: datetime, target_time: datetime, no_refresh_window: int) -> bool:
+    """判断当前是否处于禁止刷新窗口
+
+    no_refresh_window 表示目标时间前后各多少秒，窗口总宽度 = 2 * no_refresh_window。
+    例如 no_refresh_window=20 时，窗口为 [target-20s, target+20s]。
+    """
+    if no_refresh_window <= 0:
+        return False
+    window_start = target_time - timedelta(seconds=no_refresh_window)
+    window_end = target_time + timedelta(seconds=no_refresh_window)
+    return window_start <= now < window_end
+
+
+def get_effective_refresh_interval(now: datetime, target_time: datetime, base_interval: float, no_refresh_window: int) -> float:
+    """获取当前时刻的有效刷新间隔。冲刺模式返回 999（不刷新）"""
+    if no_refresh_window <= 0:
+        return base_interval
+    window_start = target_time - timedelta(seconds=no_refresh_window)
+    window_end = target_time + timedelta(seconds=no_refresh_window)
+    if window_start <= now < window_end:
+        return 999.0
+    return base_interval
 
 
 class CoderManager:
@@ -57,9 +81,9 @@ class CoderManager:
         self.fallback_plan = self.purchase_config.get('fallback_plan', 'quarterly')
         self.test_mode = test_mode
         self.target_time = target_time  # 外部传入的目标时间
-        self.stop_event = stop_event if stop_event else threading.Event()
+        self.stop_event = stop_event if stop_event else asyncio.Event()
 
-    def purchase(self) -> Dict[str, Any]:
+    async def purchase(self) -> Dict[str, Any]:
         """执行抢购流程"""
         result = {
             "success": False,
@@ -71,13 +95,13 @@ class CoderManager:
         try:
             # 打开目标页面
             logger.info("打开 GLM Coding 页面...")
-            self.page.goto("https://bigmodel.cn/glm-coding")
-            self.page.wait_for_load_state("networkidle", timeout=30000)
+            await self.page.goto("https://bigmodel.cn/glm-coding")
+            await self.page.wait_for_load_state("networkidle", timeout=30000)
 
             # 等待购买按钮出现且可用，然后高频点击
             # 测试模式：等待5秒超时
             # 订阅模式：等待到 end_after 时间（15分钟窗口）
-            clicked = self.high_frequency_click(
+            clicked = await self.high_frequency_click(
                 stop_event=self.stop_event,
                 timeout=self.purchase_config.get('end_after', 900) if not self.test_mode else 5
             )
@@ -92,18 +116,18 @@ class CoderManager:
                     return result
 
             # 等待结算页
-            time.sleep(1)
+            await asyncio.sleep(1)
 
             # 选择套餐
-            if not self._select_plan():
+            if not await self._select_plan():
                 # 套餐售罄，尝试降级
                 logger.warning(f"{self.plan_type} 售罄，尝试降级 {self.fallback_plan}")
-                if not self._select_plan(self.fallback_plan):
+                if not await self._select_plan(self.fallback_plan):
                     result["reason"] = f"{self.plan_type} 和 {self.fallback_plan} 都售罄"
                     return result
 
             # 确认订单
-            if not self._confirm_order():
+            if not await self._confirm_order():
                 result["reason"] = "订单确认失败"
                 return result
 
@@ -118,7 +142,7 @@ class CoderManager:
             result["reason"] = str(e)
             return result
 
-    def high_frequency_click(self, stop_event: threading.Event, timeout: int = 20) -> Dict[str, Any]:
+    async def high_frequency_click(self, stop_event, timeout: int = 20) -> Dict[str, Any]:
         """
         高频轮询点击模式，按钮灰色/人数过多时按配置刷新页面。
 
@@ -129,7 +153,6 @@ class CoderManager:
         Returns:
             {"success": bool, "reason": str, "page": Page, "instance_id": int}
         """
-        import threading
         step_name = "高频检测购买按钮"
         result = {"success": False, "reason": "", "page": self.page}
 
@@ -159,6 +182,7 @@ class CoderManager:
         button_available = False
         refresh_interval = get_refresh_interval(self.config)
         target_time = self.target_time if self.target_time else self._get_target_time()
+        no_refresh_window = self.purchase_config.get('no_refresh_window', 20)
 
         # click_buffer: 提前多少秒开始检测（配置可调，默认 5 秒）
         click_buffer = self.purchase_config.get(
@@ -187,53 +211,57 @@ class CoderManager:
         while datetime.now() < click_window_start:
             if stop_event.is_set():
                 return {"success": False, "reason": "被其他实例抢先", "page": self.page}
-            time.sleep(0.1)
+            await asyncio.sleep(0.1)
 
         logger.info("开始高频检测购买按钮...", extra={"step": step_name})
-        self._select_subscription_period(self.plan_type)
+        await self._select_subscription_period(self.plan_type)
 
         while datetime.now() < click_deadline:
             if stop_event.is_set():
                 return {"success": False, "reason": "被其他实例抢先", "page": self.page}
 
-            now = time.time()
-            if now - last_heartbeat_time >= 30:
+            now_ts = time.time()
+            if now_ts - last_heartbeat_time >= 30:
                 remaining = (click_deadline - datetime.now()).total_seconds()
                 logger.info(
                     f"仍在检测 Lite/{get_subscription_period_label(self.plan_type)}，剩余 {max(0, remaining):.0f} 秒",
                     extra={"step": step_name}
                 )
-                last_heartbeat_time = now
+                last_heartbeat_time = now_ts
+
+            # 检查是否处于禁止刷新窗口
+            in_no_refresh = should_skip_refresh(datetime.now(), target_time, no_refresh_window)
 
             # --- 找按钮 ---
             btn = None
             for selector in selector_list:
                 try:
-                    count = self.page.locator(selector).count()
+                    count = await self.page.locator(selector).count()
                     if count > 0:
                         candidate = self.page.locator(selector).first
-                        if candidate.is_visible():
+                        if await candidate.is_visible():
                             btn = candidate
                             break
                 except Exception:
                     continue
 
             if btn is None:
-                last_refresh_time = self._refresh_for_retry_if_needed(
-                    last_refresh_time,
-                    refresh_interval,
-                    "未找到特惠订购按钮",
-                    step_name,
-                )
-                time.sleep(0.05)
+                if not in_no_refresh:
+                    last_refresh_time = await self._refresh_for_retry_if_needed(
+                        last_refresh_time,
+                        refresh_interval,
+                        "未找到特惠订购按钮",
+                        step_name,
+                    )
+                await asyncio.sleep(0.05)
                 continue
 
             # --- 检查按钮状态 ---
             try:
-                is_disabled = btn.get_attribute('disabled')
-                btn_text = btn.inner_text()
+                is_disabled = await btn.get_attribute('disabled')
+                btn_text = await btn.inner_text()
             except Exception:
-                time.sleep(0.02)
+                await asyncio.sleep(0.02)
                 continue
 
             if is_disabled is not None or not is_ready_purchase_text(btn_text):
@@ -242,13 +270,14 @@ class CoderManager:
                     last_log_time = time.time()
                 click_start_time = None
                 if is_retry_limited_text(btn_text) or is_disabled is not None:
-                    last_refresh_time = self._refresh_for_retry_if_needed(
-                        last_refresh_time,
-                        refresh_interval,
-                        f"按钮状态为“{btn_text[:30]}”",
-                        step_name,
-                    )
-                time.sleep(0.05)
+                    if not in_no_refresh:
+                        last_refresh_time = await self._refresh_for_retry_if_needed(
+                            last_refresh_time,
+                            refresh_interval,
+                            f"按钮状态为\"{btn_text[:30]}\"",
+                            step_name,
+                        )
+                await asyncio.sleep(0.05)
                 continue
 
             # --- 按钮可用！开始高频点击 ---
@@ -260,17 +289,17 @@ class CoderManager:
             # 高频点击持续 3 秒
             if click_start_time and time.time() - click_start_time < 3:
                 try:
-                    btn.click(timeout=200, no_wait_after=True)
+                    await btn.click(timeout=200, no_wait_after=True)
                 except Exception as e:
                     logger.debug(f"点击异常: {e}")
                     button_available = False
-                    time.sleep(0.01)
+                    await asyncio.sleep(0.01)
                     continue
-                time.sleep(0.02)
+                await asyncio.sleep(0.02)
             else:
                 # 高频点击完成，验证是否成功
                 logger.info("高频点击完成，验证结果...", extra={"step": step_name})
-                if self._verify_click_success():
+                if await self._verify_click_success():
                     result["success"] = True
                     result["reason"] = "抢购成功"
                     return result
@@ -304,7 +333,7 @@ class CoderManager:
 
         return target
 
-    def _wait_until_target(self, target_time: datetime):
+    async def _wait_until_target(self, target_time: datetime):
         """等待到达目标时间"""
         refresh_interval = self.purchase_config.get('refresh_interval', 0.5)
 
@@ -312,24 +341,24 @@ class CoderManager:
             remaining = (target_time - datetime.now()).total_seconds()
             if remaining > 60:
                 logger.info(f"等待 {remaining:.0f} 秒...")
-                time.sleep(min(remaining - 55, 5))  # 提前55秒开始快速刷新
+                await asyncio.sleep(min(remaining - 55, 5))  # 提前55秒开始快速刷新
             else:
-                time.sleep(refresh_interval)
+                await asyncio.sleep(refresh_interval)
 
-    def _refresh_for_retry_if_needed(self, last_refresh_time: float, refresh_interval: float, reason: str, step_name: str) -> float:
+    async def _refresh_for_retry_if_needed(self, last_refresh_time: float, refresh_interval: float, reason: str, step_name: str) -> float:
         now = time.time()
         if now - last_refresh_time < refresh_interval:
             return last_refresh_time
 
         logger.info(f"{reason}，刷新页面后继续等待", extra={"step": step_name})
         try:
-            self.page.reload(wait_until="domcontentloaded", timeout=15000)
-            self._select_subscription_period(self.plan_type)
+            await self.page.reload(wait_until="domcontentloaded", timeout=15000)
+            await self._select_subscription_period(self.plan_type)
         except Exception as exc:
             logger.warning(f"刷新页面失败，继续轮询: {exc}", extra={"step": step_name})
         return now
 
-    def _select_subscription_period(self, plan_type: str = None) -> bool:
+    async def _select_subscription_period(self, plan_type: str = None) -> bool:
         plan_type = plan_type or self.plan_type
         label = get_subscription_period_label(plan_type)
         selectors = [
@@ -342,10 +371,10 @@ class CoderManager:
         for selector in selectors:
             try:
                 element = self.page.locator(selector).first
-                if element.is_visible(timeout=500):
-                    element.click(timeout=500, no_wait_after=True)
+                if await element.is_visible(timeout=500):
+                    await element.click(timeout=500, no_wait_after=True)
                     logger.info(f"已切换到 {label}", extra={"step": "选择订阅周期"})
-                    time.sleep(0.1)
+                    await asyncio.sleep(0.1)
                     return True
             except Exception:
                 continue
@@ -353,7 +382,7 @@ class CoderManager:
         logger.warning(f"未找到订阅周期 {label}，继续在当前页面检测", extra={"step": "选择订阅周期"})
         return False
 
-    def _select_plan(self, plan_type: str = None) -> bool:
+    async def _select_plan(self, plan_type: str = None) -> bool:
         """选择套餐类型"""
         if plan_type is None:
             plan_type = self.plan_type
@@ -376,10 +405,10 @@ class CoderManager:
             for selector in selectors:
                 try:
                     element = self.page.locator(selector).first
-                    if element.is_visible(timeout=3000):
-                        element.click()
+                    if await element.is_visible(timeout=3000):
+                        await element.click()
                         logger.info(f"已选择 {plan_type} 套餐")
-                        time.sleep(0.3)
+                        await asyncio.sleep(0.3)
                         return True
                 except Exception:
                     continue
@@ -391,17 +420,17 @@ class CoderManager:
             logger.error(f"选择套餐异常: {e}")
             return False
 
-    def _confirm_order(self) -> bool:
+    async def _confirm_order(self) -> bool:
         """确认订单"""
         try:
             confirm_btn = self.page.locator(
                 'button:has-text("确认"), button:has-text("提交"), button:has-text("去支付")'
             ).first
 
-            if confirm_btn.is_visible(timeout=5000):
-                confirm_btn.click()
+            if await confirm_btn.is_visible(timeout=5000):
+                await confirm_btn.click()
                 logger.info("订单已提交")
-                time.sleep(1)
+                await asyncio.sleep(1)
                 return True
 
             return False
@@ -410,7 +439,7 @@ class CoderManager:
             logger.error(f"确认订单异常: {e}")
             return False
 
-    def _verify_click_success(self) -> bool:
+    async def _verify_click_success(self) -> bool:
         """验证点击购买按钮后是否成功进入结算/支付流程"""
         try:
             current_url = self.page.url.lower()
@@ -424,7 +453,7 @@ class CoderManager:
                 'button:has-text("提交")',
             ]
             for ind in indicators:
-                if self.page.locator(ind).first.is_visible(timeout=1000):
+                if await self.page.locator(ind).first.is_visible(timeout=1000):
                     logger.info("检测到订单确认页面")
                     return True
             return False
