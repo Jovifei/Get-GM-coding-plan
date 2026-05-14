@@ -1,0 +1,11 @@
+﻿
+
+# Large files & generated
+logs/*.log
+debug_*.png
+screenshots/*.png
+__pycache__/
+.pytest_cache/
+storage_state.json
+*.pyc
+
