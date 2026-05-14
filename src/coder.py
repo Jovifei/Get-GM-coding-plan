@@ -1,4 +1,4 @@
-"""抢购核心模块"""
+﻿"""抢购核心模块"""
 import asyncio
 import logging
 import time
@@ -169,9 +169,13 @@ class CoderManager:
         last_heartbeat_time = 0
         click_start_time = None
         button_available = False
+        click_retry_count = 0
+        max_click_retries = 3
+        clicked_url_before = ""
         refresh_interval = get_refresh_interval(self.config)
         target_time = self.target_time if self.target_time else self._get_target_time()
-        no_refresh_window = self.purchase_config.get('no_refresh_window', 20)
+        preheat_config = self.config.get('preheat', {})
+        no_refresh_window = preheat_config.get('no_refresh_window', self.purchase_config.get('no_refresh_window', 20))
 
         # click_buffer: 提前多少秒开始检测（配置可调，默认 5 秒）
         click_buffer = self.purchase_config.get(
@@ -259,7 +263,8 @@ class CoderManager:
                     last_log_time = time.time()
                 click_start_time = None
                 if is_retry_limited_text(btn_text) or is_disabled is not None:
-                    if not in_no_refresh:
+                    force_refresh = is_retry_limited_text(btn_text)
+                    if force_refresh or not in_no_refresh:
                         last_refresh_time = await self._refresh_for_retry_if_needed(
                             last_refresh_time,
                             refresh_interval,
@@ -273,6 +278,8 @@ class CoderManager:
             if not button_available:
                 button_available = True
                 click_start_time = time.time()
+                clicked_url_before = self.page.url
+                click_retry_count = 0
                 logger.info(f"检测到可用按钮: {btn_text[:30]}，开始高频点击...", extra={"step": step_name})
 
             # 高频点击持续 3 秒
@@ -288,14 +295,39 @@ class CoderManager:
             else:
                 # 高频点击完成，验证是否成功
                 logger.info("高频点击完成，验证结果...", extra={"step": step_name})
-                if await self._verify_click_success():
+                if await self._verify_click_success(clicked_url_before):
                     result["success"] = True
                     result["reason"] = "抢购成功"
                     return result
                 else:
-                    # 点击了但页面没跳转，继续尝试
+                    # Check for new pages/popups
+                    new_pages = [p for p in self.page.context.pages if p != self.page]
+                    if new_pages:
+                        logger.info(f"Detected {len(new_pages)} new page(s), switching")
+                        try:
+                            new_page = new_pages[-1]
+                            await new_page.bring_to_front()
+                            await asyncio.sleep(0.5)
+                            if await self._verify_click_success(clicked_url_before, page=new_page):
+                                self.page = new_page
+                                result["success"] = True
+                                result["reason"] = "Click succeeded (new tab)"
+                                result["page"] = new_page
+                                return result
+                        except Exception as e:
+                            logger.debug(f"Switch to new page failed: {e}")
+
+                    click_retry_count += 1
+                    if click_retry_count >= max_click_retries:
+                        logger.warning(f"Click retry {click_retry_count} times failed, force refresh")
+                        try:
+                            await self.page.reload(wait_until="domcontentloaded", timeout=15000)
+                            await self._select_subscription_period(self.plan_type)
+                        except Exception as exc:
+                            logger.warning(f"Force refresh failed: {exc}")
+                        click_retry_count = 0
+                        last_refresh_time = time.time()
                     button_available = False
-                    click_start_time = time.time()
 
         logger.warning("高频点击超时，未检测到成功", extra={"step": step_name})
         result["reason"] = "超时未成功"
@@ -416,24 +448,64 @@ class CoderManager:
             logger.error(f"确认订单异常: {e}")
             return False
 
-    async def _verify_click_success(self) -> bool:
-        """验证点击购买按钮后是否成功进入结算/支付流程"""
+    async def _verify_click_success(self, clicked_url_before: str = "", **kwargs) -> bool:
+        """Verify if click succeeded by checking order/payment page"""
         try:
-            current_url = self.page.url.lower()
-            logger.info(f"点击后 URL: {current_url}")
+            page = kwargs.get('page', self.page)
+            current_url = page.url.lower()
+            logger.info(f"Post-click URL: {current_url}")
 
+            # 1. Fast check: URL changed (most reliable signal)
+            if clicked_url_before and clicked_url_before.lower() != current_url:
+                url_signs = ["/order", "/pay", "/checkout", "/confirm", "/subscribe"]
+                if any(sign in current_url for sign in url_signs):
+                    logger.info(f"URL navigated to order/payment: {current_url}")
+                    return True
+                if "/glm-coding" not in current_url:
+                    logger.info(f"URL left GLM Coding page: {current_url}")
+                    return True
+
+            # 2. Check page elements with 2s timeout
             indicators = [
                 'text=确认订单',
                 'text=提交订单',
                 'text=去支付',
+                'text=支付方式',
+                'text=应付金额',
+                'text=订单详情',
+                'text=checkout',
                 'button:has-text("确认")',
                 'button:has-text("提交")',
+                'button:has-text("去支付")',
             ]
             for ind in indicators:
-                if await self.page.locator(ind).first.is_visible(timeout=1000):
-                    logger.info("检测到订单确认页面")
-                    return True
+                try:
+                    if await page.locator(ind).first.is_visible(timeout=2000):
+                        logger.info(f"Order confirmation detected: {ind}")
+                        return True
+                except Exception:
+                    continue
+
+            # 3. Wait for page load then retry with longer timeout
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=3000)
+            except Exception:
+                pass
+
+            for ind in indicators:
+                try:
+                    if await page.locator(ind).first.is_visible(timeout=3000):
+                        logger.info(f"Order confirmation detected (long timeout): {ind}")
+                        return True
+                except Exception:
+                    continue
+
+            # 4. Still on GLM Coding page = definitely failed
+            if "/glm-coding" in current_url:
+                logger.debug("Still on GLM Coding page, not in checkout")
+                return False
+
             return False
         except Exception as e:
-            logger.debug(f"验证点击成功异常: {e}")
+            logger.debug(f"Click verification error: {e}")
             return False
