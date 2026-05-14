@@ -3,12 +3,20 @@ import asyncio
 import logging
 import math
 from datetime import datetime, timedelta
-from typing import Callable, Optional
+from typing import Callable
 
 from src.diagnostics import diagnostic_step
 from src.payment import PaymentManager
 
 logger = logging.getLogger(__name__)
+
+
+def resolve_sale_at(ref: datetime, purchase_config: dict) -> datetime:
+    """与预热 click_time 同一天的开售时刻，避免仅用「当前时刻」推算时滚到次日。"""
+    hour = purchase_config.get("hour", 10)
+    minute = purchase_config.get("minute", 0)
+    second = purchase_config.get("second", 0)
+    return ref.replace(hour=hour, minute=minute, second=second, microsecond=0)
 
 
 def format_remaining_for_log(remaining_seconds: float) -> str:
@@ -110,10 +118,11 @@ class Scheduler:
             if not self.running:
                 break
 
-            # 阶段4: 并发抢购
-            logger.info("开始并发抢购...")
+            # 阶段4: 并发抢购（sale_at 与 click_time 同日，钉死开售时刻）
+            sale_at = resolve_sale_at(click_time, self.purchase_config)
+            logger.info(f"本轮开售时刻 sale_at={sale_at}")
             with diagnostic_step(logger, "并发抢购"):
-                result = await preheat.start_purchase_concurrent()
+                result = await preheat.start_purchase_concurrent(sale_at=sale_at)
 
             # 阶段5: 支付
             if result.get("success") and result.get("page"):
@@ -126,7 +135,11 @@ class Scheduler:
                 else:
                     logger.warning(f"支付未完成: {payment_result.get('reason')}")
             else:
-                logger.warning(f"抢购未成功: {result.get('reason', 'unknown')}")
+                detail = result.get("detail")
+                msg = result.get("reason", "unknown")
+                if detail:
+                    msg = f"{msg} | {detail}"
+                logger.warning(f"抢购未成功: {msg}")
 
             # 清理
             with diagnostic_step(logger, "清理预热资源"):

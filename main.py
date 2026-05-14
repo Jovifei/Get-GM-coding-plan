@@ -56,9 +56,12 @@ async def run_purchase(config: dict, debug: bool = False, test_mode: bool = Fals
             await preheat.launch_instances(n=n)
         await asyncio.sleep(2)  # 等待页面稳定
 
-        # 并发抢购
+        # 并发抢购（subscribe/legacy 传入的 target_time 作为本场 sale_at；test 走短窗口）
         with diagnostic_step(logger, "测试模式-并发抢购"):
-            result = await preheat.start_purchase_concurrent()
+            result = await preheat.start_purchase_concurrent(
+                sale_at=target_time,
+                coder_test_mode=test_mode,
+            )
 
         if result.get("success") and result.get("page"):
             with diagnostic_step(logger, "测试模式-支付处理"):
@@ -69,7 +72,11 @@ async def run_purchase(config: dict, debug: bool = False, test_mode: bool = Fals
             else:
                 logger.warning(f"支付未完成: {payment_result.get('reason')}")
         else:
-            logger.warning(f"抢购未成功: {result.get('reason', 'unknown')}")
+            detail = result.get("detail")
+            msg = result.get("reason", "unknown")
+            if detail:
+                msg = f"{msg} | {detail}"
+            logger.warning(f"抢购未成功: {msg}")
 
         return result.get("success", False)
     finally:

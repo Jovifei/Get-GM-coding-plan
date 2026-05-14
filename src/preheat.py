@@ -1,9 +1,9 @@
 """预热登录与多实例并发管理 (Async)"""
 import asyncio
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
-from typing import Dict, Any
+from typing import Any, Dict, Optional
 
 from playwright.async_api import async_playwright
 
@@ -104,7 +104,13 @@ class PreheatManager:
                 await asyncio.sleep(interval)
 
     # --- 并发抢购 ---
-    async def _instance_click(self, instance: BrowserInstance, target_time: datetime) -> Dict[str, Any]:
+    async def _instance_click(
+        self,
+        instance: BrowserInstance,
+        target_time: datetime,
+        *,
+        coder_test_mode: bool = False,
+    ) -> Dict[str, Any]:
         """单个实例的高频抢购循环，运行在 asyncio 任务中"""
         result = {"success": False, "reason": "", "page": None, "instance_id": instance.id}
         try:
@@ -112,7 +118,7 @@ class PreheatManager:
                 coder = CoderManager(
                     page=instance.page,
                     config=self.config,
-                    test_mode=False,
+                    test_mode=coder_test_mode,
                     target_time=target_time,
                     stop_event=self.stop_event
                 )
@@ -130,20 +136,33 @@ class PreheatManager:
                 logger.info(f"实例 {instance.id} 抢购成功!")
                 return self.winner_result
             result["reason"] = click_result.get("reason", "未抢购成功")
+            if click_result.get("detail"):
+                result["detail"] = click_result["detail"]
         except Exception as e:
             logger.exception(f"实例 {instance.id} 异常: {e}")
             result["reason"] = str(e)
         return result
 
-    async def start_purchase_concurrent(self) -> Dict[str, Any]:
-        """用 asyncio.gather 并行执行所有实例的抢购"""
+    async def start_purchase_concurrent(
+        self,
+        sale_at: Optional[datetime] = None,
+        *,
+        coder_test_mode: bool = False,
+    ) -> Dict[str, Any]:
+        """用 asyncio.gather 并行执行所有实例的抢购。
+
+        sale_at: 由调度器传入的本场开售 datetime（与预热 click 同一天）。
+                 为 None 时沿用 _get_target_time()（如测试/临时调用）。
+        coder_test_mode: True 时 CoderManager 走测试短窗口（如 main --mode test）。
+        """
         if not self.instances:
             return {"success": False, "reason": "没有可用抢购实例", "page": None}
 
-        target_time = self._get_target_time()
+        target_time = sale_at if sale_at is not None else self._get_target_time()
+        logger.info(f"并发抢购目标时间 target_time={target_time}")
 
         tasks = [
-            self._instance_click(inst, target_time)
+            self._instance_click(inst, target_time, coder_test_mode=coder_test_mode)
             for inst in self.instances
         ]
         logger.info(f"使用 asyncio.gather 并行执行 {len(tasks)} 个实例抢购")
@@ -181,9 +200,12 @@ class PreheatManager:
         logger.info("PreheatManager 资源已清理")
 
     def _get_target_time(self) -> datetime:
-        hour = self.config.get('purchase', {}).get('hour', 10)
-        minute = self.config.get('purchase', {}).get('minute', 0)
-        second = self.config.get('purchase', {}).get('second', 0)
+        """无 sale_at 时的后备：按当前日期推算下一场开售（可能为次日）。"""
+        from datetime import timedelta
+
+        hour = self.config.get("purchase", {}).get("hour", 10)
+        minute = self.config.get("purchase", {}).get("minute", 0)
+        second = self.config.get("purchase", {}).get("second", 0)
         now = datetime.now()
         target = now.replace(hour=hour, minute=minute, second=second, microsecond=0)
         if target <= now:
