@@ -169,6 +169,8 @@ class CoderManager:
         last_heartbeat_time = 0
         click_start_time = None
         button_available = False
+        last_btn_text = ""
+        saw_ready_button = False
         click_retry_count = 0
         max_click_retries = 3
         clicked_url_before = ""
@@ -253,11 +255,16 @@ class CoderManager:
             try:
                 is_disabled = await btn.get_attribute('disabled')
                 btn_text = await btn.inner_text()
+                last_btn_text = (btn_text or "").strip()
             except Exception:
                 await asyncio.sleep(0.02)
                 continue
 
-            if is_disabled is not None or not is_ready_purchase_text(btn_text):
+            ready = is_ready_purchase_text(btn_text)
+            if ready:
+                saw_ready_button = True
+
+            if is_disabled is not None or not ready:
                 if time.time() - last_log_time > 5:
                     logger.info(f"按钮暂不可用: {btn_text[:30]}...", extra={"step": step_name})
                     last_log_time = time.time()
@@ -329,8 +336,14 @@ class CoderManager:
                         last_refresh_time = time.time()
                     button_available = False
 
-        logger.warning("高频点击超时，未检测到成功", extra={"step": step_name})
+        detail = (
+            f"sale_at={target_time}; deadline={click_deadline}; "
+            f"saw_ready_button={saw_ready_button}; "
+            f"last_button={last_btn_text[:120]!r}"
+        )
+        logger.warning(f"高频点击超时，未检测到成功 ({detail})", extra={"step": step_name})
         result["reason"] = "超时未成功"
+        result["detail"] = detail
         return result
 
     def _get_target_time(self) -> datetime:

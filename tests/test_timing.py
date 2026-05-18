@@ -5,7 +5,7 @@ from pathlib import Path
 import yaml
 
 from src.coder import calculate_click_window
-from src.scheduler import Scheduler, format_remaining_for_log
+from src.scheduler import Scheduler, format_remaining_for_log, resolve_sale_at
 
 
 class TimingTests(unittest.TestCase):
@@ -45,6 +45,18 @@ class TimingTests(unittest.TestCase):
         scheduler = Scheduler({"purchase": {}}, lambda *_args, **_kwargs: None)
 
         self.assertEqual(scheduler._parse_time("09:59:55"), (9, 59, 55))
+
+    def test_resolve_sale_at_same_calendar_day_as_click_anchor(self):
+        ref = datetime(2026, 5, 13, 9, 58, 0)
+        pc = {"hour": 10, "minute": 0, "second": 0}
+        sale = resolve_sale_at(ref, pc)
+        self.assertEqual(sale, datetime(2026, 5, 13, 10, 0, 0))
+
+    def test_resolve_sale_at_respects_second(self):
+        ref = datetime(2026, 5, 13, 9, 58, 30)
+        pc = {"hour": 10, "minute": 0, "second": 5}
+        sale = resolve_sale_at(ref, pc)
+        self.assertEqual(sale, datetime(2026, 5, 13, 10, 0, 5))
 
 
 if __name__ == "__main__":
