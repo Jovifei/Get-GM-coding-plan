@@ -94,7 +94,7 @@ class PreheatManager:
                 page = await ctx.new_page()
                 # 提前打开目标页面
                 await page.goto("https://bigmodel.cn/glm-coding", timeout=30000)
-                await page.wait_for_load_state("networkidle", timeout=30000)
+                await page.wait_for_load_state("domcontentloaded", timeout=30000)
                 instance = BrowserInstance(id=i, pw=self.pw, browser=self.browser, ctx=ctx, page=page)
                 self.instances.append(instance)
                 logger.info(f"实例 {i} 启动成功")

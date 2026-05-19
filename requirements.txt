@@ -1,3 +1,7 @@
-playwright>=1.40.0
+﻿playwright>=1.40.0
 pyyaml>=6.0
 python-dateutil>=2.8.2
+
+# 验证码OCR降级（可选，至少安装一个）
+easyocr>=1.7.0
+# paddleocr>=2.7.0

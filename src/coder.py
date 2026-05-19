@@ -2,6 +2,7 @@
 import asyncio
 import logging
 import time
+import re
 from datetime import datetime, timedelta
 from typing import Optional, Dict, Any
 
@@ -85,7 +86,7 @@ class CoderManager:
             # 打开目标页面
             logger.info("打开 GLM Coding 页面...")
             await self.page.goto("https://bigmodel.cn/glm-coding")
-            await self.page.wait_for_load_state("networkidle", timeout=30000)
+            await self.page.wait_for_load_state("domcontentloaded", timeout=30000)
 
             # 等待购买按钮出现且可用，然后高频点击
             # 测试模式：等待5秒超时
@@ -306,6 +307,36 @@ class CoderManager:
                     result["success"] = True
                     result["reason"] = "抢购成功"
                     return result
+
+                # --- 验证码处理 (方案C: DOM优先 → OCR降级) ---
+                verification_handled = await self._handle_verification_if_needed(step_name)
+                if verification_handled:
+                    await asyncio.sleep(1)
+                    # 处理完验证码后重新检查
+                    if await self._verify_click_success(clicked_url_before):
+                        result["success"] = True
+                        result["reason"] = "抢购成功(通过验证码)"
+                        return result
+                    # 检查新页签
+                    new_pages = [p for p in self.page.context.pages if p != self.page]
+                    if new_pages:
+                        try:
+                            np = new_pages[-1]
+                            await np.bring_to_front()
+                            await asyncio.sleep(0.5)
+                            if await self._verify_click_success(clicked_url_before, page=np):
+                                self.page = np
+                                result["success"] = True
+                                result["reason"] = "抢购成功(验证码+新页签)"
+                                result["page"] = np
+                                return result
+                        except Exception as e:
+                            logger.debug(f"切换新页签失败: {e}")
+
+                    logger.info("验证码已处理但尚未进入购买页，继续检测", extra={"step": step_name})
+                    button_available = False
+                    continue
+
                 else:
                     # Check for new pages/popups
                     new_pages = [p for p in self.page.context.pages if p != self.page]
@@ -522,3 +553,348 @@ class CoderManager:
         except Exception as e:
             logger.debug(f"Click verification error: {e}")
             return False
+
+    # ── 验证码处理 (方案C: DOM优先 → OCR降级) ─────────────────────
+
+    async def _handle_verification_if_needed(self, step_name: str) -> bool:
+        """检测并处理验证码弹窗，返回是否成功处理"""
+        detected = await self._detect_verification()
+        if not detected:
+            return False
+
+        logger.info("检测到验证码弹窗，开始处理...", extra={"step": step_name})
+        try:
+            await self.page.screenshot(path=f"screenshots/verification_{int(time.time())}.png")
+        except Exception:
+            pass
+
+        # 策略1: DOM解析
+        solved = await self._solve_verification_dom(step_name)
+        if solved:
+            logger.info("DOM解析验证码成功", extra={"step": step_name})
+            return True
+
+        # 策略2: OCR降级
+        logger.info("DOM解析失败，降级到OCR识别...", extra={"step": step_name})
+        solved = await self._solve_verification_ocr(step_name)
+        if solved:
+            logger.info("OCR识别验证码成功", extra={"step": step_name})
+            return True
+
+        logger.warning("验证码自动处理失败", extra={"step": step_name})
+        return False
+
+    async def _detect_verification(self) -> bool:
+        """检测页面上是否存在验证码弹窗"""
+        indicators = [
+            'text="请依次点击"', 'text="请按顺序点击"',
+            'text="安全验证"', 'text="智能验证"', 'text="人机验证"',
+            'text="请完成安全验证"', 'text="行为验证"',
+            'text="拖动下方滑块"',
+            '.geetest_panel:visible', '.geetest_holder:visible', '.geetest_widget:visible',
+            '[class*="geetest"]:visible', '[class*="captcha"]:visible',
+            '[class*="verify"]:visible', '[id*="captcha"]:visible', '[id*="verify"]:visible',
+            'iframe[src*="captcha"]:visible', 'iframe[src*="verify"]:visible',
+            'iframe[src*="geetest"]:visible',
+        ]
+        for sel in indicators:
+            try:
+                if await self.page.locator(sel).first.is_visible(timeout=500):
+                    logger.info(f"检测到验证码: {sel}")
+                    return True
+            except Exception:
+                continue
+
+        for frame in self.page.frames:
+            if frame == self.page.main_frame:
+                continue
+            try:
+                if any(kw in frame.url.lower() for kw in ['captcha', 'verify', 'geetest', 'auth']):
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _solve_verification_dom(self, step_name: str) -> bool:
+        """DOM解析方式处理验证码"""
+        try:
+            instruction = await self._get_verification_instruction()
+            logger.info(f"验证指令: {instruction[:100]}", extra={"step": step_name})
+
+            items = await self._find_verification_items_dom()
+            if not items:
+                logger.warning("DOM未找到可点击验证项", extra={"step": step_name})
+                return False
+
+            logger.info(f"找到 {len(items)} 个DOM验证项", extra={"step": step_name})
+            order = self._parse_click_order(instruction, len(items))
+
+            for idx in order:
+                if idx >= len(items):
+                    continue
+                try:
+                    await items[idx].click(timeout=500, no_wait_after=True)
+                    logger.info(f"DOM点击验证项 [{idx+1}/{len(order)}]", extra={"step": step_name})
+                    await asyncio.sleep(0.25)
+                except Exception as e:
+                    logger.warning(f"DOM点击项{idx}失败: {e}")
+
+            await asyncio.sleep(0.3)
+            return await self._click_verification_confirm()
+        except Exception as e:
+            logger.error(f"DOM验证处理异常: {e}")
+            return False
+
+    async def _get_verification_instruction(self) -> str:
+        """获取验证码指令文字"""
+        selectors = [
+            '.geetest_text', '.geetest_tip',
+            '[class*="verify-tip"]', '[class*="verify-text"]',
+            '[class*="captcha-tip"]', '[class*="captcha-text"]',
+            '[class*="instruction"]',
+        ]
+        for sel in selectors:
+            try:
+                el = self.page.locator(sel).first
+                if await el.is_visible(timeout=300):
+                    text = await el.inner_text()
+                    if text and text.strip():
+                        return text.strip()
+            except Exception:
+                continue
+
+        try:
+            body = await self.page.locator("body").inner_text()
+            for pat in [r'请依次点击图中.*?的(.*?)(?:[，。]|$)', r'请按顺序点击(.*?)(?:[，。]|$)']:
+                m = re.search(pat, body)
+                if m:
+                    return m.group(0)
+        except Exception:
+            pass
+        return ""
+
+    async def _find_verification_items_dom(self):
+        """DOM方式查找验证项"""
+        selectors = [
+            '.geetest_item_img', '.geetest_icon', '[class*="geetest_item"]',
+            '[class*="verify-item"]', '[class*="captcha-item"]',
+            '.icon-select-item', '[class*="click-icon"]',
+        ]
+        for sel in selectors:
+            try:
+                els = self.page.locator(sel)
+                cnt = await els.count()
+                items = []
+                for i in range(cnt):
+                    el = els.nth(i)
+                    if await el.is_visible(timeout=200):
+                        items.append(el)
+                if items:
+                    return items
+            except Exception:
+                continue
+
+        # 备用：查找验证容器内所有可见小图片
+        for container_sel in ['.geetest_panel', '.geetest_widget', '[class*="captcha"]', '[class*="verify"]']:
+            try:
+                ctr = self.page.locator(container_sel).first
+                if await ctr.is_visible(timeout=200):
+                    imgs = ctr.locator('img:visible')
+                    cnt = await imgs.count()
+                    items = []
+                    for i in range(cnt):
+                        el = imgs.nth(i)
+                        try:
+                            box = await el.bounding_box()
+                            if box and 25 < box['width'] < 250 and 25 < box['height'] < 250:
+                                items.append(el)
+                        except Exception:
+                            pass
+                    if items:
+                        return items
+            except Exception:
+                continue
+        return []
+
+    def _parse_click_order(self, instruction: str, item_count: int) -> list:
+        """解析点击顺序"""
+        if not instruction:
+            return list(range(item_count))
+        nums = re.findall(r'\d+', instruction)
+        if nums:
+            order = [int(n) - 1 for n in nums if 0 < int(n) <= item_count]
+            if order:
+                return order
+        return list(range(item_count))
+
+    async def _click_verification_confirm(self) -> bool:
+        """点击验证确认按钮"""
+        selectors = [
+            'button:has-text("确认")', 'button:has-text("确定")',
+            'button:has-text("提交")', 'button:has-text("完成")',
+            '.geetest_submit', '.geetest_commit',
+            '[class*="confirm"]', '[class*="submit"]',
+        ]
+        for sel in selectors:
+            try:
+                btn = self.page.locator(sel).first
+                if await btn.is_visible(timeout=500):
+                    await btn.click(timeout=500, no_wait_after=True)
+                    logger.info(f"点击验证确认: {sel}")
+                    await asyncio.sleep(1.5)
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _solve_verification_ocr(self, step_name: str) -> bool:
+        """OCR降级方案：截图验证码区域 → OCR识别字符+坐标 → 按顺序点击"""
+        try:
+            ocr = self._get_ocr_engine()
+            if ocr is None:
+                logger.warning("OCR引擎不可用，跳过OCR降级", extra={"step": step_name})
+                return False
+
+            # 定位验证码区域并截图
+            vregion = await self._locate_verification_region()
+            if vregion is None:
+                return False
+
+            region_box, region_screenshot = vregion
+            # region_box: {"x", "y", "width", "height"} of the verification area
+            # region_screenshot: bytes of the cropped screenshot
+
+            # OCR识别
+            instruction = await self._get_verification_instruction()
+            # Convert PNG bytes to numpy array for OCR
+            import io as _io
+            from PIL import Image as _Image
+            import numpy as _np
+            pil_img = _Image.open(_io.BytesIO(region_screenshot)).convert("RGB")
+            img_array = _np.array(pil_img)
+
+            instruction = await self._get_verification_instruction()
+            # EasyOCR uses readtext(), PaddleOCR callable returns list
+            if hasattr(ocr, "readtext"):
+                raw = ocr.readtext(img_array)
+                results = [{"text": r[1], "box": r[0]} for r in raw]
+            else:
+                # PaddleOCR callable
+                raw = ocr(img_array)
+                if raw and hasattr(raw[0], "text"):
+                    results = [{"text": r.text, "box": r.box} for r in raw]
+                else:
+                    results = raw
+            if not results:
+                return False
+
+            logger.info(f"OCR识别到 {len(results)} 个字符", extra={"step": step_name})
+
+            # 解析点击顺序
+            order = self._parse_ocr_click_order(instruction, results)
+
+            # 按顺序坐标点击
+            for item in order:
+                x = region_box["x"] + item["cx"]
+                y = region_box["y"] + item["cy"]
+                await self.page.mouse.click(x, y)
+                logger.info(f"OCR点击({x:.0f},{y:.0f}): {item.get('text','?')}", extra={"step": step_name})
+                await asyncio.sleep(0.3)
+
+            await asyncio.sleep(0.3)
+            return await self._click_verification_confirm()
+
+        except Exception as e:
+            logger.error(f"OCR验证处理异常: {e}")
+            return False
+
+    def _get_ocr_engine(self):
+        """获取OCR引擎（懒加载）"""
+        if hasattr(self, '_ocr_engine'):
+            return self._ocr_engine
+
+        self._ocr_engine = None
+
+        # 尝试 PaddleOCR
+        try:
+            from paddleocr import PaddleOCR
+            self._ocr_engine = PaddleOCR(lang='ch', use_angle_cls=False, show_log=False)
+            logger.info("OCR引擎: PaddleOCR")
+            return self._ocr_engine
+        except ImportError:
+            pass
+
+        # 尝试 EasyOCR
+        try:
+            import easyocr
+            self._ocr_engine = easyocr.Reader(['ch_sim', 'en'], gpu=False)
+            logger.info("OCR引擎: EasyOCR")
+            return self._ocr_engine
+        except ImportError:
+            pass
+
+        logger.warning("未安装OCR库 (paddleocr/easyocr)")
+        return None
+
+    async def _locate_verification_region(self):
+        """定位验证码区域并返回截图"""
+        container_selectors = [
+            '.geetest_panel', '.geetest_widget', '.geetest_holder',
+            '[class*="captcha-box"]', '[class*="verify-box"]',
+            '[class*="captcha-panel"]', '[class*="verify-panel"]',
+            '[class*="captcha-modal"]', '[class*="verify-modal"]',
+        ]
+
+        for sel in container_selectors:
+            try:
+                el = self.page.locator(sel).first
+                if await el.is_visible(timeout=300):
+                    box = await el.bounding_box()
+                    if box:
+                        screenshot = await el.screenshot(type='png')
+                        return box, screenshot
+            except Exception:
+                continue
+
+        # 全页面截图作为最后兜底
+        try:
+            full = await self.page.screenshot(type='png')
+            return {"x": 0, "y": 0, "width": 1920, "height": 1080}, full
+        except Exception:
+            return None
+
+    def _parse_ocr_click_order(self, instruction: str, ocr_results) -> list:
+        """Parse OCR results into click order; ocr_results is [{text, box}, ...]"""
+        items = []
+        for res in ocr_results:
+            box = res.get("box")
+            text = res.get("text", "")
+            if not box or not text:
+                continue
+            # Flatten nested box: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]] -> [(x1,y1), ...]
+            if isinstance(box[0], (list, tuple)):
+                box = box[0]
+            cx = sum(p[0] for p in box) / len(box)
+            cy = sum(p[1] for p in box) / len(box)
+            items.append({"text": str(text).strip(), "cx": cx, "cy": cy})
+
+        if not items:
+            return items
+
+        # Try to match instruction character order
+        if instruction:
+            ordered = []
+            remaining = list(items)
+            for ch in instruction:
+                for item in remaining[:]:
+                    if ch in item["text"]:
+                        ordered.append(item)
+                        remaining.remove(item)
+                        break
+            if ordered:
+                return ordered
+
+        # Default: left-to-right, top-to-bottom
+        items.sort(key=lambda i: (i["cy"], i["cx"]))
+        return items
+

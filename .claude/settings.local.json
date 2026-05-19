@@ -23,7 +23,12 @@
       "Bash(CLAUDE_CODE_GIT_BASH_PATH=\"/d/Program Files/Git/usr/bin/bash\" claude mcp:*)",
       "mcp__context7__query-docs",
       "Bash(python3:*)",
-      "WebSearch"
+      "WebSearch",
+      "Bash(powershell -Command \"Get-Item 'screenshots\\\\4ad34f0e17fae9bfbdc0877d85a597bb.png' | Select-Object Name, Length, LastWriteTime; Get-Item 'screenshots\\\\b277c7bbdc072b8f8441151df5d7d2d9.png' | Select-Object Name, Length, LastWriteTime\")",
+      "mcp__chrome-devtools__new_page",
+      "mcp__chrome-devtools__select_page",
+      "mcp__chrome-devtools__take_screenshot",
+      "mcp__chrome-devtools__take_snapshot"
     ]
   }
 }
